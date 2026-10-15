@@ -1,28 +1,52 @@
 @import "tailwindcss";
 
-* {
-  box-sizing: border-box;
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  --color-sidebar: #0a0a0f;
+  --color-fog: #0e0e14;
+  --color-paper: #17171f;
+  --color-line: #292935;
+
+  --color-ink: #ececf2;
+  --color-muted: #8f8fa0;
+
+  --color-accent: #2dd4bf;
+  --color-accent-strong: #5eead4;
+  --color-on-accent: #03201b;
+
+  --color-crit: #e8686d;
+  --color-high: #e39556;
+  --color-med: #d2b45a;
+  --color-low: #6cbf8c;
+  --color-info: #8ea4b4;
 }
 
 html {
-  background: #080a0f;
+  background: var(--color-fog);
 }
 
 body {
   margin: 0;
+  color-scheme: dark;
   min-width: 320px;
-  background: #080a0f;
-  color: #f4f4f5;
-  font-family:
-    Inter,
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
+  background: var(--color-fog);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
 }
 
 button {
   font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }

@@ -17,6 +17,7 @@ import com.milan.cloud_security_scanner.model.ScanResult;
 import com.milan.cloud_security_scanner.model.SecurityFinding;
 import com.milan.cloud_security_scanner.repository.ScanRepository;
 import com.milan.cloud_security_scanner.repository.SecurityFindingRepository;
+import com.milan.cloud_security_scanner.scanner.RemediationTracker;
 import com.milan.cloud_security_scanner.scanner.SecurityScanner;
 
 @RestController
@@ -27,15 +28,18 @@ public class ScanController {
     private final SecurityScanner securityScanner;
     private final ScanRepository scanRepository;
     private final SecurityFindingRepository securityFindingRepository;
+    private final RemediationTracker remediationTracker;
 
     public ScanController(
             SecurityScanner securityScanner,
             ScanRepository scanRepository,
-            SecurityFindingRepository securityFindingRepository) {
+            SecurityFindingRepository securityFindingRepository,
+            RemediationTracker remediationTracker) {
 
         this.securityScanner = securityScanner;
         this.scanRepository = scanRepository;
         this.securityFindingRepository = securityFindingRepository;
+        this.remediationTracker = remediationTracker;
     }
 
     @GetMapping("/scan")
@@ -71,6 +75,12 @@ public class ScanController {
                 .orElseThrow(() -> new RuntimeException("Finding not found"));
 
         finding.setStatus(status);
+
+        if (status == SecurityFinding.FindingStatus.RESOLVED) {
+            remediationTracker.markFixed(finding);
+        } else {
+            remediationTracker.markUnfixed(finding);
+        }
 
         return securityFindingRepository.save(finding);
     }

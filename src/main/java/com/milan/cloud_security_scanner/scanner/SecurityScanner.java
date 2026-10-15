@@ -14,13 +14,16 @@ public class SecurityScanner {
 
     private final List<SecurityCheck> securityChecks;
     private final ScanRepository scanRepository;
+    private final RemediationTracker remediationTracker;
 
     public SecurityScanner(
             List<SecurityCheck> securityChecks,
-            ScanRepository scanRepository) {
+            ScanRepository scanRepository,
+            RemediationTracker remediationTracker) {
 
         this.securityChecks = securityChecks;
         this.scanRepository = scanRepository;
+        this.remediationTracker = remediationTracker;
     }
 
     public List<SecurityFinding> scan() {
@@ -28,7 +31,11 @@ public class SecurityScanner {
         List<SecurityFinding> findings = new ArrayList<>();
 
         for (SecurityCheck securityCheck : securityChecks) {
-            findings.addAll(securityCheck.check());
+            for (SecurityFinding finding : securityCheck.check()) {
+                if (!remediationTracker.isFixed(finding)) {
+                    findings.add(finding);
+                }
+            }
         }
 
         Scan scan = new Scan();

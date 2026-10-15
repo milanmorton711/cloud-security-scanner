@@ -2,643 +2,428 @@ import { useEffect, useState } from "react";
 
 const API = "http://localhost:8080/api";
 
-function App() {
-  const [page, setPage] = useState("scan");
-  const [scan, setScan] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [selectedScan, setSelectedScan] = useState(null);
+const SEVERITIES = {
+  CRITICAL: { label: "Critical", color: "var(--color-crit)", badge: "bg-crit/12 text-crit ring-crit/25" },
+  HIGH: { label: "High", color: "var(--color-high)", badge: "bg-high/12 text-high ring-high/25" },
+  MEDIUM: { label: "Medium", color: "var(--color-med)", badge: "bg-med/12 text-med ring-med/25" },
+  LOW: { label: "Low", color: "var(--color-low)", badge: "bg-low/12 text-low ring-low/25" },
+};
+
+const COLUMNS = [
+  { status: "NOT_STARTED", title: "Not started", action: "Start remediation", next: "IN_PROGRESS" },
+  { status: "IN_PROGRESS", title: "In progress", action: "Mark resolved", next: "RESOLVED" },
+  { status: "RESOLVED", title: "Resolved", action: "Reopen", next: "NOT_STARTED" },
+];
+
+const RESOURCE_NAMES = {
+  S3_BUCKET: "S3 buckets",
+  IAM_POLICY: "IAM policies",
+  IAM_ROLE: "IAM roles",
+  SECURITY_GROUP: "Security groups",
+  EC2_INSTANCE: "EC2 instances",
+  RDS_INSTANCE: "RDS instances",
+  LAMBDA_FUNCTION: "Lambda functions",
+  VPC: "VPCs",
+};
+
+const ORDER = Object.keys(SEVERITIES);
+const bySeverity = (a, b) => ORDER.indexOf(a.severity) - ORDER.indexOf(b.severity);
+const newestFirst = (scans) => [...scans].sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt));
+const formatDate = (value, options = { dateStyle: "medium", timeStyle: "short" }) =>
+  value ? new Date(value).toLocaleString(undefined, options) : "";
+
+async function request(path, method = "GET") {
+  const response = await fetch(`${API}${path}`, { method });
+  if (!response.ok) throw new Error(response.status);
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
+}
+
+function Stat({ label, value, tone = "text-ink", children }) {
+  return (
+    <div className="rounded-xl border border-line bg-paper p-5">
+      <div className="text-sm text-muted">{label}</div>
+      <div className={`mt-2 text-3xl font-semibold tabular-nums ${tone}`}>{value}</div>
+      {children}
+    </div>
+  );
+}
+
+function Panel({ title, children }) {
+  return (
+    <section className="rounded-xl border border-line bg-paper p-5">
+      <h2 className="mb-5 text-sm font-medium text-muted">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
+function Donut({ findings }) {
+  const total = findings.length;
+  const slices = ORDER.map((key) => ({
+    key,
+    count: findings.filter((f) => f.severity === key).length,
+  })).map((slice, i, all) => ({
+    ...slice,
+    percent: total ? (slice.count / total) * 100 : 0,
+    offset: 25 - all.slice(0, i).reduce((sum, s) => sum + (total ? (s.count / total) * 100 : 0), 0),
+  }));
+
+  return (
+    <div className="flex items-center gap-6">
+      <svg viewBox="0 0 42 42" className="h-36 w-36 shrink-0">
+        <circle cx="21" cy="21" r="15.9155" fill="none" stroke="var(--color-line)" strokeWidth="5" />
+        {slices
+          .filter((s) => s.count > 0)
+          .map((s) => (
+            <circle
+              key={s.key}
+              cx="21"
+              cy="21"
+              r="15.9155"
+              fill="none"
+              stroke={SEVERITIES[s.key].color}
+              strokeWidth="5"
+              strokeDasharray={`${s.percent} ${100 - s.percent}`}
+              strokeDashoffset={s.offset}
+            />
+          ))}
+        <text x="21" y="22.5" textAnchor="middle" fontSize="9" fontWeight="600" fill="var(--color-ink)">
+          {total}
+        </text>
+        <text x="21" y="28" textAnchor="middle" fontSize="3.2" fill="var(--color-muted)">
+          findings
+        </text>
+      </svg>
+      <ul className="flex-1 space-y-2.5 text-sm">
+        {slices.map((s) => (
+          <li key={s.key} className="flex items-center justify-between">
+            <span className="flex items-center gap-2">
+              <span className="h-2.5 w-2.5 rounded-full" style={{ background: SEVERITIES[s.key].color }} />
+              {SEVERITIES[s.key].label}
+            </span>
+            <span className="tabular-nums text-muted">{s.count}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ResourceBars({ findings }) {
+  const counts = Object.entries(
+    findings.reduce((acc, f) => ({ ...acc, [f.resourceType]: (acc[f.resourceType] ?? 0) + 1 }), {})
+  ).sort((a, b) => b[1] - a[1]);
+  const max = Math.max(1, ...counts.map(([, count]) => count));
+
+  if (counts.length === 0) return <p className="text-sm text-muted">No findings in this scan.</p>;
+
+  return (
+    <ul className="space-y-4">
+      {counts.map(([type, count]) => (
+        <li key={type}>
+          <div className="mb-1.5 flex justify-between text-sm">
+            <span>{RESOURCE_NAMES[type] ?? type}</span>
+            <span className="tabular-nums text-muted">{count}</span>
+          </div>
+          <div className="h-2 rounded-full bg-line">
+            <div className="h-2 rounded-full bg-accent" style={{ width: `${(count / max) * 100}%` }} />
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function Trend({ scans }) {
+  const recent = [...scans].reverse().slice(-12);
+  const max = Math.max(1, ...recent.map((s) => s.totalFindings));
+
+  if (recent.length < 2) return <p className="text-sm text-muted">Run a few more scans to see the trend.</p>;
+
+  return (
+    <div>
+      <div className="flex h-36 items-end justify-around gap-1.5">
+        {recent.map((scan) => (
+          <div
+            key={scan.id}
+            title={`${formatDate(scan.startedAt)}: ${scan.totalFindings} findings`}
+            className="flex max-w-10 flex-1 flex-col-reverse overflow-hidden rounded bg-line"
+            style={{ height: `${Math.max(4, (scan.totalFindings / max) * 100)}%` }}
+          >
+            {ORDER.map((key) => (
+              <div key={key} style={{ flexGrow: scan[key.toLowerCase()] ?? 0, background: SEVERITIES[key].color }} />
+            ))}
+          </div>
+        ))}
+      </div>
+      <div className="mt-2 flex justify-between text-xs text-muted">
+        <span>{formatDate(recent[0].startedAt, { dateStyle: "short" })}</span>
+        <span>{formatDate(recent.at(-1).startedAt, { dateStyle: "short" })}</span>
+      </div>
+    </div>
+  );
+}
+
+function Card({ finding, column, onStatusChange }) {
+  const [open, setOpen] = useState(false);
+  const severity = SEVERITIES[finding.severity] ?? SEVERITIES.LOW;
+
+  return (
+    <article
+      className={`rounded-lg border border-line bg-paper p-4 transition-colors hover:border-muted/40 ${
+        column.status === "RESOLVED" ? "opacity-60" : ""
+      }`}
+    >
+      <button onClick={() => setOpen(!open)} className="w-full text-left">
+        <span className={`rounded-md px-2 py-0.5 text-xs font-semibold ring-1 ring-inset ${severity.badge}`}>
+          {severity.label}
+        </span>
+        <h4 className="mt-2.5 font-medium leading-snug">{finding.title}</h4>
+        <p className="mt-1 truncate font-mono text-xs text-muted">{finding.resourceId}</p>
+      </button>
+
+      {open && (
+        <div className="mt-4 space-y-3 border-t border-line pt-4 text-sm">
+          <p className="text-ink/85">{finding.description}</p>
+          <div className="rounded-md bg-accent/[0.07] p-3">
+            <div className="text-xs font-semibold text-accent">How to fix it</div>
+            <p className="mt-1 text-ink/85">{finding.remediation}</p>
+          </div>
+          <button
+            onClick={() => onStatusChange(finding.id, column.next)}
+            className="w-full rounded-md bg-accent py-2 font-medium text-on-accent hover:bg-accent-strong"
+          >
+            {column.action}
+          </button>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function Board({ findings, onStatusChange }) {
+  return (
+    <div className="grid gap-4 md:grid-cols-3">
+      {COLUMNS.map((column) => {
+        const items = findings.filter((f) => f.status === column.status).sort(bySeverity);
+
+        return (
+          <div key={column.status} className="rounded-xl border border-line bg-sidebar/60 p-3">
+            <h3 className="mb-3 flex items-center justify-between px-1 text-sm font-medium">
+              {column.title}
+              <span className="rounded-full bg-ink/[0.07] px-2 py-0.5 text-xs text-muted">{items.length}</span>
+            </h3>
+            <div className="space-y-2.5">
+              {items.map((finding) => (
+                <Card key={finding.id} finding={finding} column={column} onStatusChange={onStatusChange} />
+              ))}
+              {items.length === 0 && <p className="py-8 text-center text-xs text-muted">Nothing here</p>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Dashboard({ scan, scans, onStatusChange }) {
+  const findings = scan.findings ?? [];
+  const resolved = findings.filter((f) => f.status === "RESOLVED").length;
+  const open = findings.length - resolved;
+  const criticalOpen = findings.filter((f) => f.severity === "CRITICAL" && f.status !== "RESOLVED").length;
+  const progress = findings.length ? Math.round((resolved / findings.length) * 100) : 100;
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <Stat label="Total findings" value={findings.length} />
+        <Stat label="Open" value={open} tone={open ? "text-high" : "text-ink"} />
+        <Stat label="Critical still open" value={criticalOpen} tone={criticalOpen ? "text-crit" : "text-ink"} />
+        <Stat label="Remediated" value={`${progress}%`} tone="text-accent">
+          <div className="mt-3 h-1.5 rounded-full bg-line">
+            <div className="h-1.5 rounded-full bg-accent" style={{ width: `${progress}%` }} />
+          </div>
+        </Stat>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Panel title="Severity breakdown">
+          <Donut findings={findings} />
+        </Panel>
+        <Panel title="Findings by resource">
+          <ResourceBars findings={findings} />
+        </Panel>
+        <Panel title="Findings per scan">
+          <Trend scans={scans} />
+        </Panel>
+      </div>
+
+      <Board findings={findings} onStatusChange={onStatusChange} />
+    </div>
+  );
+}
+
+function History({ scans, onOpen, onDelete }) {
+  if (scans.length === 0) return <p className="text-sm text-muted">No saved scans yet.</p>;
+
+  return (
+    <ul className="divide-y divide-line overflow-hidden rounded-xl border border-line bg-paper">
+      {scans.map((scan) => (
+        <li key={scan.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
+          <div className="min-w-0 basis-full sm:basis-0 sm:flex-1">
+            <div className="font-medium">{formatDate(scan.startedAt)}</div>
+            <div className="truncate font-mono text-[11px] text-muted">{scan.id}</div>
+          </div>
+          <div className="flex h-2 w-32 overflow-hidden rounded-full bg-line">
+            {ORDER.map((key) => (
+              <div key={key} style={{ flexGrow: scan[key.toLowerCase()] ?? 0, background: SEVERITIES[key].color }} />
+            ))}
+          </div>
+          <span className="w-24 text-sm text-muted">{scan.totalFindings} findings</span>
+          <button
+            onClick={() => onOpen(scan.id)}
+            className="ml-auto rounded-md bg-accent px-3.5 py-1.5 text-[13px] font-medium text-on-accent hover:bg-accent-strong"
+          >
+            Open
+          </button>
+          <button
+            onClick={() => onDelete(scan.id)}
+            className="rounded-md border border-line px-3 py-1.5 text-[13px] text-muted hover:text-crit"
+          >
+            Delete
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export default function App() {
+  const [page, setPage] = useState("dashboard");
+  const [scans, setScans] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [historyLoading, setHistoryLoading] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    request("/scans")
+      .then((data) => setScans(newestFirst(data)))
+      .catch(() => setError("Could not reach the backend on port 8080."));
+  }, []);
+
+  const scan = scans.find((s) => s.id === selectedId) ?? scans[0];
 
   async function runScan() {
     setLoading(true);
     setError("");
-
     try {
-      const response = await fetch(`${API}/scan`);
-
-      if (!response.ok) {
-        throw new Error();
-      }
-
-      const data = await response.json();
-      setScan(data);
+      await request("/scan");
+      setScans(newestFirst(await request("/scans")));
+      setSelectedId(null);
+      setPage("dashboard");
     } catch {
-      setError("Could not connect to the scanner backend.");
+      setError("The scan failed. Check that the backend is running on port 8080.");
     } finally {
       setLoading(false);
     }
   }
 
-  async function loadHistory() {
-    setHistoryLoading(true);
-
+  async function updateStatus(id, status) {
     try {
-      const response = await fetch(`${API}/scans`);
-
-      if (!response.ok) {
-        throw new Error();
-      }
-
-      setHistory(await response.json());
+      const updated = await request(`/findings/${id}/status?status=${status}`, "PATCH");
+      setScans((current) =>
+        current.map((s) => ({ ...s, findings: s.findings.map((f) => (f.id === id ? updated : f)) }))
+      );
     } catch {
-      setError("Could not load scan history.");
-    } finally {
-      setHistoryLoading(false);
+      setError("Could not update the finding.");
     }
   }
 
   async function deleteScan(id) {
-    if (!window.confirm("Delete this scan?")) {
-      return;
-    }
-
+    if (!window.confirm("Delete this scan?")) return;
     try {
-      const response = await fetch(`${API}/scans/${id}`, {
-        method: "DELETE",
-      });
-
-      if (!response.ok) {
-        throw new Error();
-      }
-
-      setHistory((current) =>
-        current.filter((scan) => scan.id !== id)
-      );
-
-      if (selectedScan?.id === id) {
-        setSelectedScan(null);
-      }
+      await request(`/scans/${id}`, "DELETE");
+      setScans((current) => current.filter((s) => s.id !== id));
     } catch {
       setError("Could not delete the scan.");
     }
   }
 
-  async function updateFindingStatus(id, status) {
-    try {
-      const response = await fetch(
-        `${API}/findings/${id}/status?status=${status}`,
-        {
-          method: "PATCH",
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error();
-      }
-
-      const updatedFinding = await response.json();
-
-      if (selectedScan) {
-        setSelectedScan((current) => ({
-          ...current,
-          findings: current.findings.map((finding) =>
-            finding.id === id ? updatedFinding : finding
-          ),
-        }));
-      }
-
-      if (scan) {
-        setScan((current) => ({
-          ...current,
-          findings: current.findings.map((finding) =>
-            finding.id === id ? updatedFinding : finding
-          ),
-        }));
-      }
-    } catch {
-      setError("Could not update finding status.");
-    }
+  function openScan(id) {
+    setSelectedId(id);
+    setPage("dashboard");
   }
 
-  useEffect(() => {
-    if (page === "history") {
-      loadHistory();
-    }
-  }, [page]);
+  const tab = (id, text) => (
+    <button
+      onClick={() => setPage(id)}
+      className={`border-b-2 px-1 text-sm font-medium ${
+        page === id ? "border-accent text-ink" : "border-transparent text-muted hover:text-ink"
+      }`}
+    >
+      {text}
+    </button>
+  );
 
   return (
-    <div className="min-h-screen bg-[#080a0f] text-zinc-100">
-
-      <header className="border-b border-white/[0.07] bg-[#080a0f]/95">
-        <div className="mx-auto flex h-20 max-w-6xl items-center justify-between px-6">
-
-          <button
-            onClick={() => {
-              setPage("scan");
-              setSelectedScan(null);
-            }}
-            className="flex items-center gap-3"
-          >
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-xs font-bold">
-              CS
-            </div>
-
-            <div className="text-left">
-              <div className="text-sm font-semibold">
-                Cloud Security Scanner
-              </div>
-
-              <div className="text-[11px] text-zinc-500">
-                Security assessment platform
-              </div>
-            </div>
-          </button>
-
-          <div className="flex rounded-xl border border-white/[0.07] bg-white/[0.025] p-1">
-
+    <div className="min-h-screen">
+      <header className="border-b border-line bg-sidebar">
+        <div className="mx-auto flex h-16 max-w-7xl items-stretch gap-6 px-4 sm:px-6">
+          <div className="flex items-center gap-2.5 font-semibold">
+            <svg viewBox="0 0 24 24" className="h-6 w-6 text-accent" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z" strokeLinejoin="round" />
+            </svg>
+            <span className="hidden sm:inline">Cloud Security Scanner</span>
+          </div>
+          <nav className="flex gap-5">
+            {tab("dashboard", "Dashboard")}
+            {tab("history", "History")}
+          </nav>
+          <div className="ml-auto flex items-center">
             <button
-              onClick={() => {
-                setPage("scan");
-                setSelectedScan(null);
-              }}
-              className={`rounded-lg px-5 py-2 text-xs font-medium ${
-                page === "scan"
-                  ? "bg-white text-black"
-                  : "text-zinc-500 hover:text-white"
-              }`}
+              onClick={runScan}
+              disabled={loading}
+              className="rounded-md bg-accent px-4 py-2 text-sm font-semibold text-on-accent hover:bg-accent-strong disabled:opacity-70"
             >
-              Scan
+              {loading ? "Scanning..." : "Run scan"}
             </button>
-
-            <button
-              onClick={() => {
-                setPage("history");
-                setSelectedScan(null);
-                loadHistory();
-              }}
-              className={`rounded-lg px-5 py-2 text-xs font-medium ${
-                page === "history"
-                  ? "bg-white text-black"
-                  : "text-zinc-500 hover:text-white"
-              }`}
-            >
-              History
-            </button>
-
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-6 py-12">
-
+      <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
         {error && (
-          <div className="mb-6 rounded-xl border border-red-500/20 bg-red-500/[0.06] px-5 py-4 text-sm text-red-400">
-            {error}
+          <div className="mb-6 rounded-lg border border-crit/30 bg-crit/[0.06] px-4 py-3 text-sm text-crit">{error}</div>
+        )}
+
+        {page === "history" ? (
+          <>
+            <h1 className="mb-6 text-2xl font-semibold">Scan history</h1>
+            <History scans={scans} onOpen={openScan} onDelete={deleteScan} />
+          </>
+        ) : scan ? (
+          <>
+            <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <h1 className="text-2xl font-semibold">Security overview</h1>
+                <p className="mt-1 text-sm text-muted">Results from the scan on {formatDate(scan.startedAt)}</p>
+              </div>
+              {selectedId && selectedId !== scans[0]?.id && (
+                <button onClick={() => setSelectedId(null)} className="text-sm font-medium text-accent hover:underline">
+                  Back to latest scan
+                </button>
+              )}
+            </div>
+            <Dashboard scan={scan} scans={scans} onStatusChange={updateStatus} />
+          </>
+        ) : (
+          <div className="rounded-xl border border-dashed border-line px-6 py-20 text-center">
+            <h1 className="text-lg font-semibold">No scans yet</h1>
+            <p className="mt-1 text-sm text-muted">Press Run scan to check your cloud resources.</p>
           </div>
         )}
-
-        {selectedScan ? (
-          <ScanDetails
-            scan={selectedScan}
-            onBack={() => setSelectedScan(null)}
-            onStatusChange={updateFindingStatus}
-          />
-        ) : page === "scan" ? (
-          <ScanPage
-            scan={scan}
-            loading={loading}
-            runScan={runScan}
-            onStatusChange={updateFindingStatus}
-          />
-        ) : (
-          <HistoryPage
-            history={history}
-            loading={historyLoading}
-            openScan={setSelectedScan}
-            deleteScan={deleteScan}
-          />
-        )}
-
       </main>
     </div>
   );
 }
-
-function ScanPage({ scan, loading, runScan, onStatusChange }) {
-  return (
-    <div className="space-y-8">
-
-      <section className="rounded-3xl border border-white/[0.07] bg-white/[0.02] p-8 sm:p-10">
-
-        <div className="flex flex-col justify-between gap-8 sm:flex-row sm:items-end">
-
-          <div>
-            <div className="mb-3 text-[10px] font-bold tracking-[0.2em] text-zinc-500">
-              SECURITY ASSESSMENT
-            </div>
-
-            <h2 className="text-3xl font-semibold tracking-tight">
-              Scan your cloud environment
-            </h2>
-
-            <p className="mt-3 max-w-xl text-sm leading-6 text-zinc-500">
-              Identify misconfigurations, excessive permissions,
-              and publicly exposed resources.
-            </p>
-          </div>
-
-          <button
-            onClick={runScan}
-            disabled={loading}
-            className="group flex items-center justify-center gap-3 rounded-xl bg-white px-6 py-3.5 text-sm font-semibold text-black transition hover:-translate-y-0.5 hover:bg-zinc-200 disabled:cursor-wait disabled:opacity-60"
-          >
-            {loading ? "Scanning..." : "Run Security Scan"}
-
-            {!loading && (
-              <span className="text-lg transition-transform group-hover:translate-x-1">
-                →
-              </span>
-            )}
-          </button>
-
-        </div>
-      </section>
-
-      {!scan && !loading && (
-        <div className="flex min-h-72 flex-col items-center justify-center rounded-3xl border border-dashed border-white/[0.08]">
-          <h3 className="text-sm font-semibold">
-            No scan results yet
-          </h3>
-
-          <p className="mt-2 text-xs text-zinc-600">
-            Run a scan to analyze your cloud resources.
-          </p>
-        </div>
-      )}
-
-      {scan && (
-        <>
-          <Summary scan={scan} />
-
-          <section>
-            <div className="mb-5">
-              <div className="mb-2 text-[10px] font-bold tracking-[0.2em] text-zinc-500">
-                LATEST SCAN
-              </div>
-
-              <h3 className="text-xl font-semibold">
-                Security Findings
-              </h3>
-            </div>
-
-            <Findings
-              findings={scan.findings}
-              onStatusChange={onStatusChange}
-            />
-          </section>
-        </>
-      )}
-    </div>
-  );
-}
-
-function HistoryPage({
-  history,
-  loading,
-  openScan,
-  deleteScan,
-}) {
-  return (
-    <div>
-
-      <section className="mb-8">
-        <div className="mb-2 text-[10px] font-bold tracking-[0.2em] text-zinc-500">
-          SCANS
-        </div>
-
-        <h2 className="text-3xl font-semibold tracking-tight">
-          Scan History
-        </h2>
-
-        <p className="mt-2 text-sm text-zinc-500">
-          Review previous security assessments.
-        </p>
-      </section>
-
-      {loading ? (
-        <div className="flex min-h-64 items-center justify-center rounded-3xl border border-white/[0.07] text-sm text-zinc-500">
-          Loading scan history...
-        </div>
-      ) : history.length === 0 ? (
-        <div className="flex min-h-64 flex-col items-center justify-center rounded-3xl border border-dashed border-white/[0.08]">
-          <h3 className="text-sm font-semibold">
-            No scans found
-          </h3>
-        </div>
-      ) : (
-        <div className="space-y-4">
-
-          {[...history].reverse().map((item, index) => (
-            <div
-              key={item.id}
-              className="rounded-2xl border border-white/[0.07] bg-white/[0.018] p-5 transition hover:border-white/[0.13]"
-            >
-
-              <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-
-                <div className="flex items-center gap-4">
-
-                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-white/[0.07] bg-white/[0.025] text-xs font-bold text-zinc-500">
-                    #{history.length - index}
-                  </div>
-
-                  <div>
-                    <div className="text-sm font-semibold">
-                      Security Scan
-                    </div>
-
-                    <div className="mt-1 font-mono text-[10px] text-zinc-600">
-                      {item.id}
-                    </div>
-
-                    <div className="mt-1 text-xs text-zinc-500">
-                      {item.startedAt
-                        ? new Date(item.startedAt).toLocaleString()
-                        : "Unknown"}
-                    </div>
-                  </div>
-
-                </div>
-
-                <div className="flex flex-wrap items-center gap-3">
-
-                  <div className="rounded-xl border border-white/[0.06] bg-black/10 px-4 py-2.5 text-center">
-                    <div className="text-sm font-semibold text-zinc-200">
-                      {item.totalFindings}
-                    </div>
-
-                    <div className="text-[9px] uppercase tracking-wider text-zinc-600">
-                      Findings
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => openScan(item)}
-                    className="rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-2.5 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.08]"
-                  >
-                    View Scan →
-                  </button>
-
-                  <button
-                    onClick={() => deleteScan(item.id)}
-                    className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-500/10 bg-red-500/[0.03] text-lg text-zinc-600 transition hover:border-red-500/25 hover:bg-red-500/[0.08] hover:text-red-400"
-                    title="Delete scan"
-                  >
-                    ×
-                  </button>
-
-                </div>
-              </div>
-            </div>
-          ))}
-
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ScanDetails({ scan, onBack, onStatusChange }) {
-  return (
-    <div>
-
-      <button
-        onClick={onBack}
-        className="mb-8 rounded-xl border border-white/[0.07] bg-white/[0.025] px-4 py-2.5 text-xs text-zinc-400 transition hover:bg-white/[0.05] hover:text-white"
-      >
-        ← Back to History
-      </button>
-
-      <section className="mb-8">
-        <div className="mb-2 text-[10px] font-bold tracking-[0.2em] text-zinc-500">
-          SCAN DETAILS
-        </div>
-
-        <h2 className="text-3xl font-semibold tracking-tight">
-          Security Findings
-        </h2>
-
-        <p className="mt-2 text-xs text-zinc-600">
-          {scan.startedAt
-            ? new Date(scan.startedAt).toLocaleString()
-            : ""}
-        </p>
-      </section>
-
-      <Summary scan={scan} />
-
-      <section className="mt-10">
-        <Findings
-          findings={scan.findings}
-          onStatusChange={onStatusChange}
-        />
-      </section>
-    </div>
-  );
-}
-
-function Summary({ scan }) {
-  return (
-    <section className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-
-      <SummaryCard
-        label="Critical"
-        value={scan.critical}
-        color="text-red-400"
-      />
-
-      <SummaryCard
-        label="High"
-        value={scan.high}
-        color="text-orange-400"
-      />
-
-      <SummaryCard
-        label="Medium"
-        value={scan.medium}
-        color="text-yellow-400"
-      />
-
-      <SummaryCard
-        label="Total Findings"
-        value={scan.totalFindings}
-        color="text-zinc-100"
-      />
-
-    </section>
-  );
-}
-
-function SummaryCard({ label, value, color }) {
-  return (
-    <div className="rounded-2xl border border-white/[0.07] bg-white/[0.018] p-5">
-      <div className="text-[9px] font-bold uppercase tracking-[0.16em] text-zinc-600">
-        {label}
-      </div>
-
-      <div className={`mt-3 text-3xl font-semibold ${color}`}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function Findings({ findings, onStatusChange }) {
-  return (
-    <div className="space-y-3">
-
-      {findings.map((finding) => (
-        <div
-          key={finding.id}
-          className="rounded-2xl border border-white/[0.07] bg-white/[0.018] p-5"
-        >
-
-          <div className="flex gap-4">
-
-            <SeverityBadge severity={finding.severity} />
-
-            <div className="min-w-0 flex-1">
-
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-
-                <div>
-                  <h4 className="text-sm font-semibold">
-                    {finding.title}
-                  </h4>
-
-                  <div className="mt-1 font-mono text-[10px] text-zinc-600">
-                    {finding.resourceType} · {finding.resourceId}
-                  </div>
-                </div>
-
-                <FindingStatus status={finding.status} />
-
-              </div>
-
-              <p className="mt-4 text-xs leading-5 text-zinc-500">
-                {finding.description}
-              </p>
-
-              <div className="mt-4 rounded-xl border border-white/[0.05] bg-black/10 p-4">
-
-                <div className="text-[9px] font-bold tracking-[0.15em] text-zinc-600">
-                  REMEDIATION
-                </div>
-
-                <p className="mt-1 text-xs leading-5 text-zinc-400">
-                  {finding.remediation}
-                </p>
-
-              </div>
-
-              <div className="mt-4 flex flex-wrap gap-2">
-
-                {finding.status === "NOT_STARTED" && (
-                  <button
-                    onClick={() =>
-                      onStatusChange(
-                        finding.id,
-                        "IN_PROGRESS"
-                      )
-                    }
-                    className="rounded-xl border border-blue-500/20 bg-blue-500/[0.06] px-3 py-2 text-[10px] font-semibold text-blue-400 transition hover:bg-blue-500/[0.12]"
-                  >
-                    Start Remediation
-                  </button>
-                )}
-
-                {finding.status === "IN_PROGRESS" && (
-                  <button
-                    onClick={() =>
-                      onStatusChange(
-                        finding.id,
-                        "RESOLVED"
-                      )
-                    }
-                    className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.06] px-3 py-2 text-[10px] font-semibold text-emerald-400 transition hover:bg-emerald-500/[0.12]"
-                  >
-                    Mark Resolved
-                  </button>
-                )}
-
-                {finding.status === "RESOLVED" && (
-                  <button
-                    onClick={() =>
-                      onStatusChange(
-                        finding.id,
-                        "NOT_STARTED"
-                      )
-                    }
-                    className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-[10px] font-semibold text-zinc-400 transition hover:bg-white/[0.07]"
-                  >
-                    Reopen
-                  </button>
-                )}
-
-              </div>
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function FindingStatus({ status }) {
-  const styles = {
-    NOT_STARTED:
-      "border-zinc-500/20 bg-zinc-500/[0.06] text-zinc-400",
-
-    IN_PROGRESS:
-      "border-blue-500/20 bg-blue-500/[0.06] text-blue-400",
-
-    RESOLVED:
-      "border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-400",
-  };
-
-  const labels = {
-    NOT_STARTED: "Not Started",
-    IN_PROGRESS: "In Progress",
-    RESOLVED: "Resolved",
-  };
-
-  return (
-    <div
-      className={`flex shrink-0 items-center gap-2 rounded-xl border px-3 py-2 text-[9px] font-bold uppercase tracking-wider ${
-        styles[status] || styles.NOT_STARTED
-      }`}
-    >
-      <span className="h-1.5 w-1.5 rounded-full bg-current" />
-      {labels[status] || "Not Started"}
-    </div>
-  );
-}
-
-function SeverityBadge({ severity }) {
-  const styles = {
-    CRITICAL:
-      "border-red-500/20 bg-red-500/[0.08] text-red-400",
-    HIGH:
-      "border-orange-500/20 bg-orange-500/[0.08] text-orange-400",
-    MEDIUM:
-      "border-yellow-500/20 bg-yellow-500/[0.08] text-yellow-400",
-    LOW:
-      "border-emerald-500/20 bg-emerald-500/[0.08] text-emerald-400",
-    INFO:
-      "border-blue-500/20 bg-blue-500/[0.08] text-blue-400",
-  };
-
-  return (
-    <div
-      className={`h-fit shrink-0 rounded-lg border px-2.5 py-1.5 text-[9px] font-bold tracking-wider ${
-        styles[severity] || styles.INFO
-      }`}
-    >
-      {severity}
-    </div>
-  );
-}
-
-export default App;
